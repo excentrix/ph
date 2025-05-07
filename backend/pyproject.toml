@@ -1,0 +1,48 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ai-student-mentor"
+version = "0.1.0"
+authors = [
+  { name = "AI Mentor Team" },
+]
+description = "AI Student Mentoring Platform"
+readme = "../README.md"
+requires-python = ">=3.11"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: Other/Proprietary License",
+    "Operating System :: OS Independent",
+]
+
+[project.dependencies]
+fastapi = "^0.110.0"
+uvicorn = "^0.27.1"
+pydantic = "^2.6.1"
+sqlalchemy = "^2.0.27"
+asyncpg = "^0.29.0"
+psycopg2-binary = "^2.9.9"
+neo4j = "^5.15.0"
+chromadb = "^0.4.22"
+langchain = "^0.1.12"
+langchain-openai = "^0.0.8"
+pydantic-settings = "^2.2.1"
+python-jose = "^3.3.0"
+passlib = "^1.7.4"
+python-multipart = "^0.0.9"
+redis = "^5.0.1"
+httpx = "^0.26.0"
+pytest = "^8.0.0"
+pytest-asyncio = "^0.23.5"
+vllm = "^0.3.0"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.pytest]
+testpaths = ["tests"]
+python_files = "test_*.py"
+python_functions = "test_*"
