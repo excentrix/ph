@@ -1,3 +1,5 @@
+'use client';
+
 import React, { useState } from 'react';
 import { Button } from '@/components/ui/button';
 import { Textarea } from '@/components/ui/textarea';
@@ -23,7 +25,7 @@ export const ChatInput: React.FC<ChatInputProps> = ({
   };
   
   return (
-    <form onSubmit={handleSubmit} className="flex items-end gap-2">
+    <form onSubmit={handleSubmit} className="flex items-end gap-2 w-full ">
       <Textarea
         value={message}
         onChange={(e) => setMessage(e.target.value)}

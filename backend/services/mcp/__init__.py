@@ -1,6 +1,7 @@
-from services.mcp.base import mcp_registry, BasePattern, MCPResult, MCPStep
+from services.mcp.server import mcp_server, run_mcp_server
 
-# Import all patterns to register them
-from services.mcp.patterns.academic_guidance import AcademicProgressAnalysisPattern
 
-__all__ = ["mcp_registry", "BasePattern", "MCPResult", "MCPStep"]
+
+__all__ = ["mcp_server", "run_mcp_server", ]
+
+# from services.mcp.server import mcp

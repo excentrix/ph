@@ -1,6 +1,6 @@
 from typing import Dict, Any
 from services.agent.base import BaseAgent, AgentResponse, agent_registry
-from services.mcp.base import BasePattern, MCPResult
+from backend.services.mcp.server import BasePattern, MCPResult
 import logging
 
 logger = logging.getLogger(__name__)

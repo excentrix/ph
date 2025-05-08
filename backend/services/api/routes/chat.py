@@ -1,144 +1,352 @@
-from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
-from typing import Dict, Any, List
-from pydantic import BaseModel, Field
-from datetime import datetime
-import uuid
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect, HTTPException, Depends
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel
+from typing import Dict, Any, List, Optional
+import json
+import asyncio
+from fastmcp import Client
+from services.mcp import mcp_server
+import logging
+from langchain_ollama import ChatOllama
+from langchain.schema import SystemMessage, HumanMessage
+from langchain_google_genai import ChatGoogleGenerativeAI
+from core.config import settings
 
-from services.agent import AgentCoordinator
-from core.schemas.base import StandardResponse
+logger = logging.getLogger(__name__)
 
+import getpass
+import os
+
+if "GOOGLE_API_KEY" not in os.environ:
+    os.environ["GOOGLE_API_KEY"] = settings.GOOGLE_API_KEY
+# Create router
 router = APIRouter()
-agent_coordinator = AgentCoordinator()
+
+# Initialize LangChain LLM
+llm = ChatGoogleGenerativeAI(
+    model="gemini-2.0-flash",
+    # other parameters as needed
+)
 
 class ChatMessage(BaseModel):
-    """Chat message model."""
-    role: str = Field(..., description="Role of the message sender (system, user, assistant)")
-    content: str = Field(..., description="Content of the message")
-    timestamp: datetime = Field(default_factory=datetime.utcnow)
-    metadata: Dict[str, Any] = Field(default_factory=dict)
+    """Chat message model"""
+    role: str
+    content: str
 
 class ChatRequest(BaseModel):
-    """Chat request model."""
-    message: str = Field(..., description="User message")
-    session_id: str = Field(default_factory=lambda: str(uuid.uuid4()), description="Chat session ID")
-    context: Dict[str, Any] = Field(default_factory=dict, description="Additional context for the message")
+    """Chat request model"""
+    messages: List[ChatMessage]
+    student_id: Optional[str] = None
 
-class ChatResponse(StandardResponse):
-    """Chat response model."""
-    data: Dict[str, Any] = {
-        "message": None,
-        "session_id": None
-    }
-
-class ChatHistoryResponse(StandardResponse):
-    """Chat history response model."""
-    data: Dict[str, Any] = {
-        "session_id": None,
-        "messages": []
-    }
-
-# In-memory message storage (would be replaced with database in production)
-chat_sessions: Dict[str, List[ChatMessage]] = {}
-
-async def update_context_from_history(session_id: str) -> Dict[str, Any]:
-    """Update context from chat history."""
-    if session_id not in chat_sessions:
-        return {}
+class ChatResponse(BaseModel):
+    """Chat response model"""
+    message: ChatMessage
+    metadata: Optional[Dict[str, Any]] = None
     
-    context = {
-        "chat_history": [
-            {"role": msg.role, "content": msg.content}
-            for msg in chat_sessions[session_id][-10:]  # Last 10 messages
-        ]
-    }
-    
-    return context
+@router.get("/test")
+async def test():
+    """Test endpoint"""
+    return {"message": "Hello, this is a test endpoint!"}
 
-@router.post("/send", response_model=ChatResponse)
-async def send_message(
-    request: ChatRequest,
-    background_tasks: BackgroundTasks
-) -> ChatResponse:
-    """Send a message to the AI mentor."""
+@router.post("/", response_model=ChatResponse)
+async def chat(request: ChatRequest):
+    """Process a chat message and return a response"""
     try:
-        # Initialize session if needed
-        if request.session_id not in chat_sessions:
-            chat_sessions[request.session_id] = []
+        # Extract the latest user message
+        if not request.messages or len(request.messages) == 0:
+            raise HTTPException(status_code=400, detail="No messages provided")
         
-        # Add user message to history
-        user_message = ChatMessage(
-            role="user",
-            content=request.message,
-            metadata={"session_id": request.session_id}
-        )
-        chat_sessions[request.session_id].append(user_message)
+        latest_message = request.messages[-1]
+        if latest_message.role != "user":
+            raise HTTPException(status_code=400, detail="Last message must be from user")
         
-        # Update context with chat history
-        context = await update_context_from_history(request.session_id)
+        # Create context with student information if provided
+        context = {}
+        if request.student_id:
+            # Use in-memory client to access student data
+            async with Client(mcp_server) as client:
+                # Retrieve student profile
+                try:
+                    profile_response = await client.read_resource(f"student://{request.student_id}/profile")
+                    if profile_response and profile_response.content:
+                        context["student_profile"] = profile_response.content
+                    
+                    # Retrieve student courses
+                    courses_response = await client.read_resource(f"student://{request.student_id}/courses")
+                    if courses_response and courses_response.content:
+                        context["student_courses"] = courses_response.content
+                except Exception as e:
+                    logger.error(f"Error retrieving student data: {str(e)}")
         
-        # Add user-provided context
-        context.update(request.context)
+        # Create conversation history
+        conversation_history = []
+        for msg in request.messages[:-1]:  # Exclude the latest message
+            conversation_history.append({
+                "role": msg.role,
+                "content": msg.content
+            })
         
-        # Process message with agent coordinator
-        response = await agent_coordinator.process_message(request.message, context)
+        # Determine which MCP pattern to use based on message content
+        pattern_to_use = await determine_pattern(latest_message.content)
         
-        # Add assistant message to history
-        assistant_message = ChatMessage(
-            role="assistant",
-            content=response.content,
-            metadata=response.metadata
-        )
-        chat_sessions[request.session_id].append(assistant_message)
-        
-        # Schedule background tasks (e.g., updating memory, analytics)
-        background_tasks.add_task(update_memory, request.session_id, user_message, assistant_message)
+        # Process message using appropriate MCP pattern
+        async with Client(mcp_server) as client:
+            response = None
+            
+            # Try to process with identified pattern
+            if pattern_to_use == "academic_progress":
+                # If student courses are available, use them
+                if "student_courses" in context:
+                    response = await client.call_tool(
+                        "analyze_academic_performance", 
+                        {
+                            "courses": context.get("student_courses", []),
+                            "goals": context.get("student_profile", {}).get("career_goals", [])
+                        }
+                    )
+            elif pattern_to_use == "career_guidance" and "student_profile" in context:
+                # Use student profile for career guidance
+                profile = context.get("student_profile", {})
+                response = await client.call_tool(
+                    "analyze_career_path",
+                    {
+                        "interests": profile.get("interests", []),
+                        "skills": [],  # No skills in mock data
+                        "courses": context.get("student_courses", []),
+                        "career_goals": profile.get("career_goals", [])
+                    }
+                )
+            
+            # If pattern-specific processing failed or wasn't applicable, use LangChain
+            if not response or not getattr(response, "text", None):
+                # System message for LLM
+                system_message_text = """
+                You are an AI student mentor that provides academic advice, career guidance, 
+                and educational support. Be helpful, encouraging, and provide specific, 
+                actionable advice to students.
+                """
+                
+                # Prepare a prompt that includes context if available
+                prompt = latest_message.content
+                if context:
+                    # Add relevant context to help the LLM
+                    context_str = json.dumps(context, indent=2)
+                    full_prompt = f"""
+                    Student message: {prompt}
+                    
+                    Context information:
+                    {context_str}
+                    
+                    Provide a helpful, encouraging response that addresses the student's question
+                    and incorporates relevant information from their profile and courses if appropriate.
+                    """
+                else:
+                    full_prompt = prompt
+                
+                # Use LangChain to generate a response
+                langchain_messages = [
+                    SystemMessage(content=system_message_text),
+                    HumanMessage(content=full_prompt)
+                ]
+                
+                # Add conversation history if available
+                # This would need more processing to convert to LangChain message format
+                
+                llm_response = await llm.ainvoke(langchain_messages)
+                content = llm_response.content
+            else:
+                # Extract content from the MCP response
+                if hasattr(response, "text"):
+                    content = response.text
+                elif hasattr(response, "content"):
+                    # If it's a tool response with JSON content
+                    if isinstance(response.content, dict):
+                        # Use LangChain to format the JSON content into a natural language response
+                        json_str = json.dumps(response.content, indent=2)
+                        natural_prompt = f"""
+                        I need to convert this JSON result into a natural, helpful response for a student:
+                        
+                        {json_str}
+                        
+                        Write a friendly, conversational response that includes the key insights and 
+                        recommendations from this data.
+                        """
+                        
+                        langchain_messages = [
+                            SystemMessage(content="You are a helpful assistant that converts JSON data into natural language."),
+                            HumanMessage(content=natural_prompt)
+                        ]
+                        
+                        natural_response = await llm.ainvoke(langchain_messages)
+                        content = natural_response.content
+                    else:
+                        content = str(response.content)
+                else:
+                    # Fallback response
+                    content = "I'm sorry, I wasn't able to process your request properly. Could you please try again or rephrase your question?"
         
         return ChatResponse(
-            success=True,
-            message="Message processed successfully",
-            data={
-                "message": {
-                    "content": response.content,
-                    "metadata": response.metadata
-                },
-                "session_id": request.session_id
-            }
+            message=ChatMessage(role="assistant", content=content),
+            metadata={"pattern": pattern_to_use}
         )
     
     except Exception as e:
-        return ChatResponse(
-            success=False,
-            message=f"Error processing message: {str(e)}",
-            data={
-                "message": {
-                    "content": "I apologize, but I encountered an error. Please try again.",
-                    "metadata": {"error": str(e)}
-                },
-                "session_id": request.session_id
-            }
-        )
+        logger.error(f"Error in chat endpoint: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"An error occurred: {str(e)}")
 
-@router.get("/history/{session_id}", response_model=ChatHistoryResponse)
-async def get_chat_history(session_id: str) -> ChatHistoryResponse:
-    """Get chat history for a session."""
-    if session_id not in chat_sessions:
-        raise HTTPException(status_code=404, detail=f"Chat session {session_id} not found")
+# Update your WebSocket endpoint similarly
+@router.websocket("/ws/chat")
+async def websocket_chat(websocket: WebSocket):
+    """WebSocket endpoint for streaming chat interactions"""
+    await websocket.accept()
     
-    return ChatHistoryResponse(
-        success=True,
-        message="Chat history retrieved successfully",
-        data={
-            "session_id": session_id,
-            "messages": [msg.model_dump() for msg in chat_sessions[session_id]]
-        }
-    )
+    try:
+        async with Client(mcp_server) as client:
+            while True:
+                # Receive and parse message
+                data = await websocket.receive_text()
+                request_data = json.loads(data)
+                
+                message = request_data.get("message", "")
+                student_id = request_data.get("student_id")
+                
+                # Create context with student information if provided
+                context = {}
+                if student_id:
+                    # Retrieve student profile
+                    try:
+                        profile_response = await client.read_resource(f"student://{student_id}/profile")
+                        if profile_response and profile_response.content:
+                            context["student_profile"] = profile_response.content
+                        
+                        # Retrieve student courses
+                        courses_response = await client.read_resource(f"student://{student_id}/courses")
+                        if courses_response and courses_response.content:
+                            context["student_courses"] = courses_response.content
+                    except Exception as e:
+                        logger.error(f"Error retrieving student data: {str(e)}")
+                
+                # Determine which MCP pattern to use based on message content
+                pattern_to_use = await determine_pattern(message)
+                
+                # Process message with appropriate pattern
+                response = None
+                
+                # Try to process with identified pattern
+                if pattern_to_use == "academic_progress" and "student_courses" in context:
+                    response = await client.call_tool(
+                        "analyze_academic_performance", 
+                        {
+                            "courses": context.get("student_courses", []),
+                            "goals": context.get("student_profile", {}).get("career_goals", [])
+                        }
+                    )
+                elif pattern_to_use == "career_guidance" and "student_profile" in context:
+                    profile = context.get("student_profile", {})
+                    response = await client.call_tool(
+                        "analyze_career_path",
+                        {
+                            "interests": profile.get("interests", []),
+                            "skills": [],
+                            "courses": context.get("student_courses", []),
+                            "career_goals": profile.get("career_goals", [])
+                        }
+                    )
+                
+                # If pattern-specific processing failed or wasn't applicable, use LangChain
+                if not response or not getattr(response, "text", None):
+                    # System message for LLM
+                    system_message_text = """
+                    You are an AI student mentor that provides academic advice, career guidance, 
+                    and educational support. Be helpful, encouraging, and provide specific, 
+                    actionable advice to students.
+                    """
+                    
+                    # Add context to prompt if available
+                    if context:
+                        context_str = json.dumps(context, indent=2)
+                        full_prompt = f"""
+                        Student message: {message}
+                        
+                        Context information:
+                        {context_str}
+                        
+                        Provide a helpful, encouraging response that addresses the student's question
+                        and incorporates relevant information from their profile and courses if appropriate.
+                        """
+                    else:
+                        full_prompt = message
+                    
+                    # Use LangChain to generate a response
+                    langchain_messages = [
+                        SystemMessage(content=system_message_text),
+                        HumanMessage(content=full_prompt)
+                    ]
+                    
+                    llm_response = await llm.ainvoke(langchain_messages)
+                    content = llm_response.content
+                else:
+                    # Extract content from the MCP response
+                    if hasattr(response, "text"):
+                        content = response.text
+                    elif hasattr(response, "content"):
+                        if isinstance(response.content, dict):
+                            # Format JSON into natural language using LangChain
+                            json_str = json.dumps(response.content, indent=2)
+                            natural_prompt = f"""
+                            I need to convert this JSON result into a natural, helpful response for a student:
+                            
+                            {json_str}
+                            
+                            Write a friendly, conversational response that includes the key insights and 
+                            recommendations from this data.
+                            """
+                            
+                            langchain_messages = [
+                                SystemMessage(content="You are a helpful assistant that converts JSON data into natural language."),
+                                HumanMessage(content=natural_prompt)
+                            ]
+                            
+                            natural_response = await llm.ainvoke(langchain_messages)
+                            content = natural_response.content
+                        else:
+                            content = str(response.content)
+                    else:
+                        content = "I'm sorry, I wasn't able to process your request properly. Could you please try again or rephrase your question?"
+                
+                # Send response
+                await websocket.send_json({
+                    "message": content,
+                    "metadata": {"pattern": pattern_to_use}
+                })
+                
+    except WebSocketDisconnect:
+        logger.info("WebSocket client disconnected")
+    except Exception as e:
+        logger.error(f"Error in WebSocket endpoint: {str(e)}", exc_info=True)
+        await websocket.close(code=1011, reason=f"Error: {str(e)}")
 
-async def update_memory(
-    session_id: str, 
-    user_message: ChatMessage, 
-    assistant_message: ChatMessage
-) -> None:
-    """Background task to update memory systems."""
-    # This would integrate with the memory service in a full implementation
-    # For now, just a placeholder
-    pass
+async def determine_pattern(message: str) -> str:
+    """
+    Determine which MCP pattern to use based on message content.
+    
+    Args:
+        message: The user's message
+        
+    Returns:
+        The name of the pattern to use
+    """
+    message_lower = message.lower()
+    
+    if any(keyword in message_lower for keyword in ["grade", "gpa", "performance", "academic", "study plan"]):
+        print("Academic Progress Pattern")
+        return "academic_progress"
+    elif any(keyword in message_lower for keyword in ["career", "job", "profession", "future", "industry"]):
+        print("Career Guidance Pattern")
+        return "career_guidance"
+    elif any(keyword in message_lower for keyword in ["schedule", "plan", "semester", "degree"]):
+        print("Planning Pattern")
+        return "planning"
+    else:
+        print("General Pattern")
+        return "general"

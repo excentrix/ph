@@ -1,3 +1,6 @@
+'use client';
+
+
 import React, { useEffect, useRef } from 'react';
 import { useChatStore } from '@/store/chat-store';
 import ChatMessage from './ChatMessage';
@@ -48,7 +51,7 @@ export const ChatWindow: React.FC = () => {
         )}
       </CardContent>
       
-      <CardFooter className="border-t p-4">
+      <CardFooter className="w-full border-t p-4">
         <ChatInput onSendMessage={sendMessage} isLoading={isLoading} />
       </CardFooter>
     </Card>

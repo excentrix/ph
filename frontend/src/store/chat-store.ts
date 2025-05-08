@@ -33,23 +33,18 @@ export const useChatStore = create<ChatState>((set, get) => ({
         messages: [...state.messages, userMessage],
       }));
       
-      // Send message to API
-      const response = await chatService.sendMessage({
-        message,
-        session_id: get().sessionId || undefined,
-      });
+      // Get previous messages excluding the one we just added
+      const previousMessages = get().messages.slice(0, -1);
       
-      // Update session ID if not set
-      if (!get().sessionId) {
-        set({ sessionId: response.data.session_id });
-      }
+      // Send message to API with all previous messages
+      const response = await chatService.sendMessage(message, previousMessages);
       
       // Add assistant response
       const assistantMessage: ChatMessage = {
         role: 'assistant',
-        content: response.data.message.content,
+        content: response.message.content,
         timestamp: new Date().toISOString(),
-        metadata: response.data.message.metadata,
+        metadata: response.metadata,
       };
       
       set(state => ({

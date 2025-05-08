@@ -33,8 +33,13 @@ class Settings(BaseSettings):
     REDIS_PORT: Union[int, str] = 6379
     
     # LLM
-    LLM_MODEL: str = "gpt-3.5-turbo"
-    OPENAI_API_KEY: str
+    LLM_PROVIDER: str
+    LLM_MODEL: str
+    GOOGLE_API_KEY: str
+    
+    # FastMCP settings
+    MCP_SERVER_NAME: str
+    MCP_SERVER_PORT: int
     
     # Vector DB
     VECTOR_DB_DIR: str = "./data/vector_db"

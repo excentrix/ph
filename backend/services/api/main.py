@@ -1,10 +1,17 @@
-import uvicorn
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-
-from core.config import settings
 from services.api.routes import api_router
+from core.config import settings
+import logging
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+)
+
+print(settings)
 
 # Create FastAPI app
 app = FastAPI(
@@ -22,12 +29,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
 # Include API routes
 app.include_router(api_router, prefix=settings.API_PREFIX)
 
 # Global exception handler
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
+    logging.error(f"Unhandled exception: {str(exc)}", exc_info=True)
     return JSONResponse(
         status_code=500,
         content={"message": f"An unexpected error occurred: {str(exc)}"},
@@ -43,6 +52,6 @@ async def root():
 async def health_check():
     return {"status": "healthy"}
 
-# Run the API server
 if __name__ == "__main__":
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+    import uvicorn
+    uvicorn.run("services.api.main:app", host="0.0.0.0", port=8000, reload=True)

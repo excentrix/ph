@@ -12,7 +12,7 @@ const api = axios.create({
 export interface ChatMessage {
   role: 'system' | 'user' | 'assistant';
   content: string;
-  timestamp: string;
+  timestamp?: string;
   metadata?: Record<string, any>;
 }
 
@@ -21,27 +21,38 @@ export interface ChatSession {
   messages: ChatMessage[];
 }
 
+// Update this to match your FastAPI ChatRequest model
 export interface ChatRequest {
-  message: string;
-  session_id?: string;
-  context?: Record<string, any>;
+  messages: ChatMessage[];
+  student_id?: string;
 }
 
+// Update this to match your FastAPI ChatResponse model
 export interface ChatResponse {
-  success: boolean;
-  message: string;
-  data: {
-    message: {
-      content: string;
-      metadata: Record<string, any>;
-    };
-    session_id: string;
-  };
+  message: ChatMessage;
+  metadata?: Record<string, any>;
 }
 
 export const chatService = {
-  sendMessage: async (request: ChatRequest): Promise<ChatResponse> => {
-    const response = await api.post<ChatResponse>('/chat/send', request);
+  sendMessage: async (message: string, previousMessages: ChatMessage[] = []): Promise<ChatResponse> => {
+    // Create the messages array with all previous messages plus the new one
+    const messages: ChatMessage[] = [
+      ...previousMessages,
+      {
+        role: 'user',
+        content: message,
+        timestamp: new Date().toISOString()
+      }
+    ];
+    
+    // Format the request according to what FastAPI expects
+    const request: ChatRequest = {
+      messages: messages,
+      // You can add student_id here if needed
+      // student_id: "1234"
+    };
+    
+    const response = await api.post<ChatResponse>('/chat', request);
     return response.data;
   },
   
